@@ -9,6 +9,12 @@ If you:
 Then this is the package for you.
 
 
+## Installation
+
+`go get github.com/joshrendek/redis-rate-limit`
+
+
+
 ## Usage
 
 See `examples/main.go`
