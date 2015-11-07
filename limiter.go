@@ -11,47 +11,37 @@ import (
 const maxRate = 15
 
 type RateLimit struct {
-	Redis   *redis.Client
-	maxRate int64
-}
-
-func NewRateLimit(addr string, rate int64) RateLimit {
-	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		PoolSize: 40,
-	})
-	_, err := client.Ping().Result()
-	if err != nil {
-		panic(err)
-	}
-	return RateLimit{Redis: client, maxRate: rate}
+	Redis        *redis.Client
+	maxRate      int64
+	RateDuration time.Duration
 }
 
 func (l *RateLimit) Add(i int) {
-	multi := l.Redis.Multi()
-	multi.Watch("wg")
-	l.CheckPauseIncr(multi)
-	multi.Incr("wg")
-	multi.Unwatch("wg")
-	multi.Close()
+	lock_check := l.Redis.SetNX("wg_lock", "t", 0).Val()
+	for {
+		if lock_check {
+			break
+		}
+		time.Sleep(l.RateDuration)
+		lock_check = l.Redis.SetNX("wg_lock", "t", 0).Val()
+	}
+	l.CheckPauseIncr()
+	l.Redis.Incr("wg")
+	l.Redis.Del("wg_lock")
 	//l.Redis.Incr("wg")
 }
 
 func (l *RateLimit) Done() {
-	multi := l.Redis.Multi()
-	multi.Watch("wg")
-	multi.Decr("wg")
-	multi.Unwatch("wg")
-	multi.Close()
+	l.Redis.Decr("wg")
 }
 
-func (l *RateLimit) CheckPauseIncr(multi *redis.Multi) {
+func (l *RateLimit) CheckPauseIncr() {
 	for {
-		wgVal, _ := multi.Get("wg").Int64()
+		wgVal, _ := l.Redis.Get("wg").Int64()
 		if wgVal < l.maxRate {
 			break
 		}
-		time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
+		//time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
 	}
 }
 
@@ -72,8 +62,20 @@ var (
 	tasks = make(chan bool, 40)
 )
 
+func NewRateLimit(addr string, rate int64, duration time.Duration) RateLimit {
+	client := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		PoolSize: 40,
+	})
+	_, err := client.Ping().Result()
+	if err != nil {
+		panic(err)
+	}
+	return RateLimit{Redis: client, maxRate: rate, RateDuration: duration}
+}
+
 func startWorkers() {
-	limiter := NewRateLimit("localhost:6379", maxRate)
+	limiter := NewRateLimit("localhost:6379", maxRate, 100*time.Millisecond)
 	for i := 0; i < 40; i++ {
 		wg.Add(1)
 		go func() {
