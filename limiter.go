@@ -10,6 +10,11 @@ import (
 
 const lockName = "wg"
 
+// A RateLimit is used to contain config options for the limiter
+// maxRate is the concurrency limit
+// RateDuration is used as a duration for busy waiting on the lock key
+// workerTimeout is used as the TTL for the worker key, this should be set
+// longer than you expect your workers to take.
 type RateLimit struct {
 	Redis         *redis.Client
 	maxRate       int64
@@ -30,15 +35,22 @@ func (l *RateLimit) acquireLock() {
 
 }
 
+// Add is for telling wait group something is starting
+// A lock using SetNX is created in redis based on the lockName
+// The lock busy waits until its free and then acquires it
+// RateDuration should be set to something reasonable so the CPU
+// isn't wasting cycles.
+// This handles generating the UUID for the lock set and also
+// the lock keys that are given a TTL
 func (l *RateLimit) Add(i int) string {
-	lock_check := l.Redis.SetNX(lockName+":lock", "t", 0).Val()
+	lockCheck := l.Redis.SetNX(lockName+":lock", "t", 0).Val()
 	l.Redis.Expire(lockName+":lock", 10*time.Second)
 	for {
-		if lock_check {
+		if lockCheck {
 			break
 		}
 		time.Sleep(l.RateDuration)
-		lock_check = l.Redis.SetNX(lockName+":lock", "t", 0).Val()
+		lockCheck = l.Redis.SetNX(lockName+":lock", "t", 0).Val()
 	}
 	l.checkRate()
 	uid := uuid.NewV4()
@@ -62,10 +74,11 @@ func (l *RateLimit) cleanLocks() {
 	}
 }
 
+// Done Instructs the limiter to remove the lock key
+// and uuid from the lock set
 func (l *RateLimit) Done(uid string) {
 	l.Redis.Del(lockName + ":" + uid)
 	l.Redis.SRem(lockName, uid)
-	//l.Redis.Decr("wg")
 }
 
 func (l *RateLimit) checkRate() {
@@ -77,23 +90,12 @@ func (l *RateLimit) checkRate() {
 	}
 }
 
-func (l *RateLimit) Wait() {
-	for {
-		wgVal, _ := l.Redis.Get(lockName + ":lock").Int64()
-		if wgVal != 0 {
-			time.Sleep(1 * time.Second)
-			continue
-		} else {
-			break
-		}
-	}
-}
-
 var (
 	wg    sync.WaitGroup
 	tasks = make(chan bool, 40)
 )
 
+// NewRateLimit is for setting up a new rate limiter with options
 func NewRateLimit(addr string, rate int64, duration time.Duration, workerTimeout time.Duration) RateLimit {
 	client := redis.NewClient(&redis.Options{
 		Addr:     addr,
