@@ -1,53 +1,85 @@
-package main
+package limit
 
 import (
 	"fmt"
+	"github.com/satori/go.uuid"
 	"gopkg.in/redis.v3"
-	"math/rand"
 	"sync"
 	"time"
 )
 
-const maxRate = 15
+const lockName = "wg"
 
 type RateLimit struct {
-	Redis        *redis.Client
-	maxRate      int64
-	RateDuration time.Duration
+	Redis         *redis.Client
+	maxRate       int64
+	RateDuration  time.Duration
+	workerTimeout time.Duration
 }
 
-func (l *RateLimit) Add(i int) {
-	lock_check := l.Redis.SetNX("wg_lock", "t", 0).Val()
+// Add()
+// Add lockName:UUID to set
+// Add lockName:UUID key with expiration
+// Get members in set, check for key existance, remove from set if key doesn't exist
+// Return uuid used
+
+// Done(uuid)
+// Remove lockName:UUID
+
+func (l *RateLimit) acquireLock() {
+
+}
+
+func (l *RateLimit) Add(i int) string {
+	lock_check := l.Redis.SetNX(lockName+":lock", "t", 0).Val()
+	l.Redis.Expire(lockName+":lock", 10*time.Second)
 	for {
 		if lock_check {
 			break
 		}
 		time.Sleep(l.RateDuration)
-		lock_check = l.Redis.SetNX("wg_lock", "t", 0).Val()
+		lock_check = l.Redis.SetNX(lockName+":lock", "t", 0).Val()
 	}
-	l.CheckPauseIncr()
-	l.Redis.Incr("wg")
-	l.Redis.Del("wg_lock")
-	//l.Redis.Incr("wg")
+	l.checkRate()
+	uid := uuid.NewV4()
+	l.Redis.Set(lockName+":"+uid.String(), uid.String(), l.workerTimeout)
+	l.Redis.SAdd(lockName, uid.String())
+	l.Redis.Del(lockName + ":lock")
+	l.cleanLocks()
+	return uid.String()
 }
 
-func (l *RateLimit) Done() {
-	l.Redis.Decr("wg")
+func (l *RateLimit) cleanLocks() {
+	workers := l.Redis.SMembers(lockName).Val()
+	for _, w := range workers {
+		if l.Redis.Exists(lockName + ":" + w).Val() {
+			continue
+		} else {
+			// It expired! Lets make sure it gets removed from the lock set
+			fmt.Println("Removing: ", w)
+			l.Redis.SRem(lockName, w)
+		}
+	}
 }
 
-func (l *RateLimit) CheckPauseIncr() {
+func (l *RateLimit) Done(uid string) {
+	l.Redis.Del(lockName + ":" + uid)
+	l.Redis.SRem(lockName, uid)
+	//l.Redis.Decr("wg")
+}
+
+func (l *RateLimit) checkRate() {
 	for {
-		wgVal, _ := l.Redis.Get("wg").Int64()
+		wgVal := l.Redis.SCard(lockName).Val()
 		if wgVal < l.maxRate {
 			break
 		}
-		//time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
 	}
 }
 
 func (l *RateLimit) Wait() {
 	for {
-		wgVal, _ := l.Redis.Get("wg").Int64()
+		wgVal, _ := l.Redis.Get(lockName + ":lock").Int64()
 		if wgVal != 0 {
 			time.Sleep(1 * time.Second)
 			continue
@@ -62,7 +94,7 @@ var (
 	tasks = make(chan bool, 40)
 )
 
-func NewRateLimit(addr string, rate int64, duration time.Duration) RateLimit {
+func NewRateLimit(addr string, rate int64, duration time.Duration, workerTimeout time.Duration) RateLimit {
 	client := redis.NewClient(&redis.Options{
 		Addr:     addr,
 		PoolSize: 40,
@@ -71,40 +103,5 @@ func NewRateLimit(addr string, rate int64, duration time.Duration) RateLimit {
 	if err != nil {
 		panic(err)
 	}
-	return RateLimit{Redis: client, maxRate: rate, RateDuration: duration}
-}
-
-func startWorkers() {
-	limiter := NewRateLimit("localhost:6379", maxRate, 100*time.Millisecond)
-	for i := 0; i < 40; i++ {
-		wg.Add(1)
-		go func() {
-			for data := range tasks {
-				limiter.Add(1)
-				fmt.Printf("Working .... %+v\n", data)
-				time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond)
-				// do some work on data
-				limiter.Done()
-			}
-			wg.Done()
-		}()
-	}
-}
-
-func main() {
-
-	go startWorkers()
-
-	//for i := 0; i < 50; i++ {
-	for {
-		tasks <- true
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	//// Push to it like this:
-	//tasks <- someData
-
-	// Finish like this
-	close(tasks)
-	wg.Wait()
+	return RateLimit{Redis: client, maxRate: rate, RateDuration: duration, workerTimeout: workerTimeout}
 }
