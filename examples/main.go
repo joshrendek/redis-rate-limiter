@@ -14,7 +14,14 @@ var (
 )
 
 func startWorkers() {
-	limiter := limit.NewRateLimit("localhost:6379", 15, 100*time.Millisecond, 5*time.Second)
+	opts := limit.Options{
+		Address:          "localhost:6379",
+		LockName:         "wg",
+		MaxRate:          15,
+		LockWaitDuration: 100 * time.Millisecond,
+		WorkerTimeout:    5 * time.Second,
+	}
+	limiter := limit.NewRateLimit(opts)
 	for i := 0; i < 40; i++ {
 		wg.Add(1)
 		go func() {
@@ -31,19 +38,13 @@ func startWorkers() {
 }
 
 func main() {
-
 	go startWorkers()
 
-	//for i := 0; i < 50; i++ {
-	for {
+	for i := 0; i < 5000; i++ {
 		tasks <- true
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	//// Push to it like this:
-	//tasks <- someData
-
-	// Finish like this
 	close(tasks)
 	wg.Wait()
 }

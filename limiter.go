@@ -8,68 +8,63 @@ import (
 	"time"
 )
 
-const lockName = "wg"
-
-// A RateLimit is used to contain config options for the limiter
-// maxRate is the concurrency limit
-// RateDuration is used as a duration for busy waiting on the lock key
-// workerTimeout is used as the TTL for the worker key, this should be set
+// Options is used to contain config options for the limiter
+// Address is the address of the redis server
+// MaxRate is the concurrency limit
+// LockWaitDuration is used as a duration for busy waiting on the lock key
+// WorkerTimeout is used as the TTL for the worker key, this should be set
 // longer than you expect your workers to take.
-type RateLimit struct {
-	Redis         *redis.Client
-	maxRate       int64
-	RateDuration  time.Duration
-	workerTimeout time.Duration
+type Options struct {
+	Address          string
+	MaxRate          int64
+	LockWaitDuration time.Duration
+	WorkerTimeout    time.Duration
+	LockName         string
 }
 
-// Add()
-// Add lockName:UUID to set
-// Add lockName:UUID key with expiration
-// Get members in set, check for key existance, remove from set if key doesn't exist
-// Return uuid used
-
-// Done(uuid)
-// Remove lockName:UUID
-
-func (l *RateLimit) acquireLock() {
-
+// RateLimit is the limiter object exposed to control concurrency
+type RateLimit struct {
+	Redis *redis.Client
+	Opts  Options
 }
 
 // Add is for telling wait group something is starting
-// A lock using SetNX is created in redis based on the lockName
+// A lock using SetNX is created in redis based on the l.Opts.LockName
 // The lock busy waits until its free and then acquires it
-// RateDuration should be set to something reasonable so the CPU
+// LockWaitDuration should be set to something reasonable so the CPU
 // isn't wasting cycles.
-// This handles generating the UUID for the lock set and also
+// Add handles generating the UUID for the lock set and also
 // the lock keys that are given a TTL
+// The return value should be stored so you can pass the
+// uid to Done()
 func (l *RateLimit) Add(i int) string {
-	lockCheck := l.Redis.SetNX(lockName+":lock", "t", 0).Val()
-	l.Redis.Expire(lockName+":lock", 10*time.Second)
+	lockCheck := l.Redis.SetNX(l.Opts.LockName+":lock", "t", 0).Val()
+	l.Redis.Expire(l.Opts.LockName+":lock", 10*time.Second)
 	for {
 		if lockCheck {
 			break
 		}
-		time.Sleep(l.RateDuration)
-		lockCheck = l.Redis.SetNX(lockName+":lock", "t", 0).Val()
+		time.Sleep(l.Opts.LockWaitDuration)
+		lockCheck = l.Redis.SetNX(l.Opts.LockName+":lock", "t", 0).Val()
 	}
 	l.checkRate()
 	uid := uuid.NewV4()
-	l.Redis.Set(lockName+":"+uid.String(), uid.String(), l.workerTimeout)
-	l.Redis.SAdd(lockName, uid.String())
-	l.Redis.Del(lockName + ":lock")
+	l.Redis.Set(l.Opts.LockName+":"+uid.String(), uid.String(), l.Opts.WorkerTimeout)
+	l.Redis.SAdd(l.Opts.LockName, uid.String())
+	l.Redis.Del(l.Opts.LockName + ":lock")
 	l.cleanLocks()
 	return uid.String()
 }
 
 func (l *RateLimit) cleanLocks() {
-	workers := l.Redis.SMembers(lockName).Val()
+	workers := l.Redis.SMembers(l.Opts.LockName).Val()
 	for _, w := range workers {
-		if l.Redis.Exists(lockName + ":" + w).Val() {
+		if l.Redis.Exists(l.Opts.LockName + ":" + w).Val() {
 			continue
 		} else {
 			// It expired! Lets make sure it gets removed from the lock set
 			fmt.Println("Removing: ", w)
-			l.Redis.SRem(lockName, w)
+			l.Redis.SRem(l.Opts.LockName, w)
 		}
 	}
 }
@@ -77,14 +72,14 @@ func (l *RateLimit) cleanLocks() {
 // Done Instructs the limiter to remove the lock key
 // and uuid from the lock set
 func (l *RateLimit) Done(uid string) {
-	l.Redis.Del(lockName + ":" + uid)
-	l.Redis.SRem(lockName, uid)
+	l.Redis.Del(l.Opts.LockName + ":" + uid)
+	l.Redis.SRem(l.Opts.LockName, uid)
 }
 
 func (l *RateLimit) checkRate() {
 	for {
-		wgVal := l.Redis.SCard(lockName).Val()
-		if wgVal < l.maxRate {
+		wgVal := l.Redis.SCard(l.Opts.LockName).Val()
+		if wgVal < l.Opts.MaxRate {
 			break
 		}
 	}
@@ -96,14 +91,14 @@ var (
 )
 
 // NewRateLimit is for setting up a new rate limiter with options
-func NewRateLimit(addr string, rate int64, duration time.Duration, workerTimeout time.Duration) RateLimit {
+func NewRateLimit(opts Options) RateLimit {
 	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
+		Addr:     opts.Address,
 		PoolSize: 40,
 	})
 	_, err := client.Ping().Result()
 	if err != nil {
 		panic(err)
 	}
-	return RateLimit{Redis: client, maxRate: rate, RateDuration: duration, workerTimeout: workerTimeout}
+	return RateLimit{Redis: client, Opts: opts}
 }
