@@ -13,7 +13,10 @@ Then this is the package for you.
 
 `go get github.com/joshrendek/redis-rate-limit`
 
+## Guarantees
 
+* Global lock deadlock prevention with a TTL
+* Individual worker lock deadlock prevention with TTLs
 
 ## Usage
 
